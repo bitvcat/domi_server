@@ -1,0 +1,119 @@
+/******************************************************************** 
+创建时间:        2015/06/28 14:03
+文件名称:        tcp_context.cpp
+文件作者:        Domi
+*********************************************************************/
+
+#include <functional>
+#include "tcp_context.h"
+#include "tcp_server.h"
+#include "common/log/log.h"
+#include "common/basic/memoryFunctions.h"
+
+CTcpContext::CTcpContext()
+{
+	initialize();
+}
+
+// 初始化
+void CTcpContext::initialize()
+{
+	m_fd = 0;
+	m_bufev = nullptr;
+	m_inbufLen = 0;
+	m_readBegin = 0;
+	m_clOwnerThread = nullptr;
+	m_clTcpServer = nullptr;
+	_connected = false;
+
+	memset(m_inbuf, 0, MaxBuffLen);
+	memset(m_outbuf, 0, MaxBuffLen);
+}
+
+// private method
+void CTcpContext::initContext(CTcpServer* _network, CTcpThread*_thread, evutil_socket_t fd, uint32 id)
+{
+	m_clTcpServer = _network;
+	m_clOwnerThread = _thread;
+	m_fd = fd;
+	m_ContextId = id;
+
+	_connected = true;
+}
+
+// 关于epoll LT 模式下，处理可写
+// 参看muduo的代码，大概思路：
+// 写数据时，直接调用send（）发送；只有当send（）返回EAGIAN时，才将socket加入EPOLL，等待可写事件后，再发送数据。全部数据发送完毕，再移出EPOLL
+bool CTcpContext::send(const char* pBuffer,int32 nSize)
+{
+	if (!m_bufev){
+		disconnect();
+		return false;
+	}
+
+	struct evbuffer* output = bufferevent_get_output(m_bufev);
+	uint32 len = evbuffer_get_length(output);
+	if (evbuffer_get_length(output)>=MaxBuffLenLimit){	// 积压太多消息
+		disconnect();
+		return false;
+	}
+
+	uint32 msgLen = sizeof(PacketHead) + nSize;
+	PacketHead* head = (PacketHead*)(m_outbuf);
+	head->uPacketSize = msgLen;
+	head->uHeadFlag = 10;
+	head->uVersion = 77;
+
+	dMemcpy(m_outbuf + sizeof(PacketHead), sizeof(m_outbuf), pBuffer, nSize);
+
+	if (bufferevent_write(m_bufev, m_outbuf, msgLen) == -1){
+		disconnect();
+		return false;
+	}
+
+	return true;
+}
+
+void CTcpContext::disablebev()
+{
+	if (m_bufev){
+		bufferevent_lock(m_bufev);
+		evutil_closesocket(m_fd);	// 断开bufferevent后，需要关闭套接字，否则会有问题
+		bufferevent_free(m_bufev);
+		bufferevent_unlock(m_bufev);
+
+		this->initialize();	// 复位
+	}
+}
+
+void CTcpContext::disconnect()
+{
+	this->disablebev();
+
+	if (m_clTcpServer){
+		m_clTcpServer->OnDisConnect(this);
+	}
+}
+
+bool CTcpContext::processPacket()
+{
+	if (!_connected)	// 没有链接完成
+		return false;
+
+	if (!m_clTcpServer)
+		return false;
+
+	return m_clTcpServer->OnProcessPacket(this);
+}
+
+// 远程地址
+ulong CTcpContext::remote_address()
+{
+	return 0;
+}
+
+// 远程地址的ip
+const char*	CTcpContext::remote_ip()
+{
+	return "test";
+}
